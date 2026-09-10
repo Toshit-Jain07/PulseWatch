@@ -3,6 +3,8 @@ package com.toshit.PulseWatch.scheduler;
 import com.toshit.PulseWatch.checker.CheckResult;
 import com.toshit.PulseWatch.checker.MonitorCheckService;
 import com.toshit.PulseWatch.entity.Monitor;
+import com.toshit.PulseWatch.entity.MonitorCheck;
+import com.toshit.PulseWatch.repository.MonitorCheckRepository;
 import com.toshit.PulseWatch.repository.MonitorRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,6 +23,7 @@ public class MonitorScheduler {
 
     private final MonitorRepository monitorRepository;
     private final MonitorCheckService monitorCheckService;
+    private final MonitorCheckRepository monitorCheckRepository;
 
     @Scheduled(fixedRate = 10000)
     public void checkDueMonitors() {
@@ -31,6 +34,18 @@ public class MonitorScheduler {
             for (Monitor monitor : dueMonitors) {
                 executor.submit(() -> {
                     CheckResult result = monitorCheckService.check(monitor);
+
+                    MonitorCheck monitorCheck = new MonitorCheck();
+                    monitorCheck.setMonitor(monitor);
+                    monitorCheck.setSuccess(result.success());
+                    monitorCheck.setStatusCode(result.statusCode());
+                    monitorCheck.setResponseTimeMs(result.responseTimeMs());
+                    monitorCheck.setFailureReason(result.failureReason());
+                    monitorCheckRepository.save(monitorCheck);
+
+                    monitor.setLastCheckedAt(LocalDateTime.now());
+                    monitorRepository.save(monitor);
+
                     log.info("Checked {} ({}): success={}, status={}, time={}ms, reason={}",
                             monitor.getName(),
                             monitor.getUrl(),
@@ -38,8 +53,9 @@ public class MonitorScheduler {
                             result.statusCode(),
                             result.responseTimeMs(),
                             result.failureReason());
-                });
-            }
+                });            }
         } // executor.close() is called automatically here — waits for all submitted tasks to finish
     }
+
+
 }
