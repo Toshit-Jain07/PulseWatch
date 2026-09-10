@@ -51,6 +51,12 @@ public class Monitor {
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
 
+    @Column(name = "consecutive_failures", nullable = false)
+    private Integer consecutiveFailures = 0;
+
+    @Column(name = "consecutive_successes", nullable = false)
+    private Integer consecutiveSuccesses = 0;
+
     @PrePersist
     protected void onCreate() {
         this.createdAt = LocalDateTime.now();

@@ -4,6 +4,7 @@ import com.toshit.PulseWatch.checker.CheckResult;
 import com.toshit.PulseWatch.checker.MonitorCheckService;
 import com.toshit.PulseWatch.entity.Monitor;
 import com.toshit.PulseWatch.entity.MonitorCheck;
+import com.toshit.PulseWatch.entity.MonitorStatus;
 import com.toshit.PulseWatch.repository.MonitorCheckRepository;
 import com.toshit.PulseWatch.repository.MonitorRepository;
 import lombok.RequiredArgsConstructor;
@@ -43,6 +44,9 @@ public class MonitorScheduler {
                     monitorCheck.setFailureReason(result.failureReason());
                     monitorCheckRepository.save(monitorCheck);
 
+
+                    applyCheckResult(monitor, result);
+
                     monitor.setLastCheckedAt(LocalDateTime.now());
                     monitorRepository.save(monitor);
 
@@ -55,6 +59,26 @@ public class MonitorScheduler {
                             result.failureReason());
                 });            }
         } // executor.close() is called automatically here — waits for all submitted tasks to finish
+    }
+
+    private void applyCheckResult(Monitor monitor, CheckResult result) {
+        if (result.success()) {
+            monitor.setConsecutiveSuccesses(monitor.getConsecutiveSuccesses() + 1);
+            monitor.setConsecutiveFailures(0);
+
+            if (monitor.getConsecutiveSuccesses() >= 2 && monitor.getStatus() != MonitorStatus.UP) {
+                log.info("Monitor {} recovered — flipping to UP", monitor.getName());
+                monitor.setStatus(MonitorStatus.UP);
+            }
+        } else {
+            monitor.setConsecutiveFailures(monitor.getConsecutiveFailures() + 1);
+            monitor.setConsecutiveSuccesses(0);
+
+            if (monitor.getConsecutiveFailures() >= 2 && monitor.getStatus() != MonitorStatus.DOWN) {
+                log.warn("Monitor {} failing repeatedly — flipping to DOWN", monitor.getName());
+                monitor.setStatus(MonitorStatus.DOWN);
+            }
+        }
     }
 
 
