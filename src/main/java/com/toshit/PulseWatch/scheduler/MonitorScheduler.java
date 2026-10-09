@@ -1,10 +1,12 @@
 package com.toshit.PulseWatch.scheduler;
 
+import com.toshit.PulseWatch.entity.Incident;
 import com.toshit.PulseWatch.checker.CheckResult;
 import com.toshit.PulseWatch.checker.MonitorCheckService;
 import com.toshit.PulseWatch.entity.Monitor;
 import com.toshit.PulseWatch.entity.MonitorCheck;
 import com.toshit.PulseWatch.entity.MonitorStatus;
+import com.toshit.PulseWatch.repository.IncidentRepository;
 import com.toshit.PulseWatch.repository.MonitorCheckRepository;
 import com.toshit.PulseWatch.repository.MonitorRepository;
 import lombok.RequiredArgsConstructor;
@@ -25,6 +27,7 @@ public class MonitorScheduler {
     private final MonitorRepository monitorRepository;
     private final MonitorCheckService monitorCheckService;
     private final MonitorCheckRepository monitorCheckRepository;
+    private final IncidentRepository incidentRepository;
 
     @Scheduled(fixedRate = 10000)
     public void checkDueMonitors() {
@@ -57,26 +60,49 @@ public class MonitorScheduler {
                             result.statusCode(),
                             result.responseTimeMs(),
                             result.failureReason());
+
                 });            }
         } // executor.close() is called automatically here — waits for all submitted tasks to finish
     }
 
     private void applyCheckResult(Monitor monitor, CheckResult result) {
+        LocalDateTime now = LocalDateTime.now();
+
         if (result.success()) {
             monitor.setConsecutiveSuccesses(monitor.getConsecutiveSuccesses() + 1);
             monitor.setConsecutiveFailures(0);
+            monitor.setFailureStreakStartedAt(null);            // streak is over
 
             if (monitor.getConsecutiveSuccesses() >= 2 && monitor.getStatus() != MonitorStatus.UP) {
                 log.info("Monitor {} recovered — flipping to UP", monitor.getName());
                 monitor.setStatus(MonitorStatus.UP);
+
+                incidentRepository.findByMonitorIdAndResolvedFalse(monitor.getId())
+                        .ifPresent(incident -> {
+                            incident.resolve(now);
+                            incidentRepository.save(incident);
+                        });
             }
         } else {
             monitor.setConsecutiveFailures(monitor.getConsecutiveFailures() + 1);
             monitor.setConsecutiveSuccesses(0);
 
+            if (monitor.getConsecutiveFailures() == 1) {
+                monitor.setFailureStreakStartedAt(now);         // first failure of a new streak
+            }
+
             if (monitor.getConsecutiveFailures() >= 2 && monitor.getStatus() != MonitorStatus.DOWN) {
                 log.warn("Monitor {} failing repeatedly — flipping to DOWN", monitor.getName());
                 monitor.setStatus(MonitorStatus.DOWN);
+
+                Incident incident = new Incident();
+                incident.setMonitor(monitor);
+                incident.setStartedAt(
+                        monitor.getFailureStreakStartedAt() != null
+                                ? monitor.getFailureStreakStartedAt()
+                                : now);
+                incident.setFailureReason(result.failureReason());
+                incidentRepository.save(incident);
             }
         }
     }

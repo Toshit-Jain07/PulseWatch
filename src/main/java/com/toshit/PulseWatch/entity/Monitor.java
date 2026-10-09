@@ -57,6 +57,9 @@ public class Monitor {
     @Column(name = "consecutive_successes", nullable = false)
     private Integer consecutiveSuccesses = 0;
 
+    @Column(name = "failure_streak_started_at")
+    private LocalDateTime failureStreakStartedAt;
+
     @PrePersist
     protected void onCreate() {
         this.createdAt = LocalDateTime.now();
