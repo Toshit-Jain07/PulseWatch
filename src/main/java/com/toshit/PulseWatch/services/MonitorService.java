@@ -66,7 +66,7 @@ public class MonitorService {
         monitorRepository.delete(monitor);
     }
 
-    private Monitor findOwnedMonitor(Long userId, Long monitorId) {
+    public Monitor findOwnedMonitor(Long userId, Long monitorId) {
         Monitor monitor = monitorRepository.findById(monitorId)
                 .orElseThrow(() -> new RuntimeException("Monitor not found"));
 
