@@ -23,7 +23,8 @@ public class MonitorRequest {
     private Integer expectedStatusCode;
 
     @NotNull(message = "Check interval is required")
-    @Min(value = 30, message = "Check interval must be at least 10 seconds")
+    @Min(value = 30, message = "Check interval must be at least 30 seconds")
+    @Max(value = 900, message = "Check interval must be at most 15 minutes")
     private Integer checkIntervalSeconds;
 
     @NotNull(message = "Timeout is required")

@@ -60,6 +60,15 @@ public class Monitor {
     @Column(name = "failure_streak_started_at")
     private LocalDateTime failureStreakStartedAt;
 
+    @Column(name = "success_streak_started_at")
+    private LocalDateTime successStreakStartedAt;
+
+    @Column(name = "alert_active", nullable = false)
+    private boolean alertActive = false;
+
+    @Column(name = "last_alert_sent_at")
+    private LocalDateTime lastAlertSentAt;
+
     @PrePersist
     protected void onCreate() {
         this.createdAt = LocalDateTime.now();

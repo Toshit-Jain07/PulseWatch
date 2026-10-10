@@ -9,11 +9,13 @@ import com.toshit.PulseWatch.entity.MonitorStatus;
 import com.toshit.PulseWatch.repository.IncidentRepository;
 import com.toshit.PulseWatch.repository.MonitorCheckRepository;
 import com.toshit.PulseWatch.repository.MonitorRepository;
+import com.toshit.PulseWatch.services.EmailService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.concurrent.Executors;
@@ -29,6 +31,10 @@ public class MonitorScheduler {
     private final MonitorCheckRepository monitorCheckRepository;
     private final IncidentRepository incidentRepository;
 
+    private final EmailService emailService;
+
+    private static final Duration RECOVERY_CONFIRMATION = Duration.ofMinutes(1);
+    private static final Duration REMINDER_INTERVAL = Duration.ofHours(1);
     @Scheduled(fixedRate = 10000)
     public void checkDueMonitors() {
         List<Monitor> dueMonitors = monitorRepository.findDueMonitors(LocalDateTime.now());
@@ -71,24 +77,42 @@ public class MonitorScheduler {
         if (result.success()) {
             monitor.setConsecutiveSuccesses(monitor.getConsecutiveSuccesses() + 1);
             monitor.setConsecutiveFailures(0);
-            monitor.setFailureStreakStartedAt(null);            // streak is over
+            monitor.setFailureStreakStartedAt(null);
+
+            if (monitor.getConsecutiveSuccesses() == 1) {
+                monitor.setSuccessStreakStartedAt(now);
+            }
 
             if (monitor.getConsecutiveSuccesses() >= 2 && monitor.getStatus() != MonitorStatus.UP) {
                 log.info("Monitor {} recovered — flipping to UP", monitor.getName());
                 monitor.setStatus(MonitorStatus.UP);
 
+                LocalDateTime recoveredAt = monitor.getSuccessStreakStartedAt() != null
+                        ? monitor.getSuccessStreakStartedAt() : now;
                 incidentRepository.findByMonitorIdAndResolvedFalse(monitor.getId())
                         .ifPresent(incident -> {
-                            incident.resolve(now);
+                            incident.resolve(recoveredAt);
                             incidentRepository.save(incident);
                         });
+            }
+
+            // recovery email: only after 5 continuous minutes of being up
+            if (monitor.isAlertActive()
+                    && monitor.getStatus() == MonitorStatus.UP
+                    && monitor.getSuccessStreakStartedAt() != null
+                    && Duration.between(monitor.getSuccessStreakStartedAt(), now)
+                    .compareTo(RECOVERY_CONFIRMATION) >= 0) {
+                String to = monitorRepository.findOwnerEmail(monitor.getId());
+                emailService.sendRecoveryAlert(to, monitor.getName(), monitor.getUrl());
+                monitor.setAlertActive(false);
             }
         } else {
             monitor.setConsecutiveFailures(monitor.getConsecutiveFailures() + 1);
             monitor.setConsecutiveSuccesses(0);
+            monitor.setSuccessStreakStartedAt(null);
 
             if (monitor.getConsecutiveFailures() == 1) {
-                monitor.setFailureStreakStartedAt(now);         // first failure of a new streak
+                monitor.setFailureStreakStartedAt(now);
             }
 
             if (monitor.getConsecutiveFailures() >= 2 && monitor.getStatus() != MonitorStatus.DOWN) {
@@ -97,12 +121,29 @@ public class MonitorScheduler {
 
                 Incident incident = new Incident();
                 incident.setMonitor(monitor);
-                incident.setStartedAt(
-                        monitor.getFailureStreakStartedAt() != null
-                                ? monitor.getFailureStreakStartedAt()
-                                : now);
+                incident.setStartedAt(monitor.getFailureStreakStartedAt() != null
+                        ? monitor.getFailureStreakStartedAt() : now);
                 incident.setFailureReason(result.failureReason());
                 incidentRepository.save(incident);
+
+                // DOWN email only if the user isn't already in an alerted state
+                if (!monitor.isAlertActive()) {
+                    String to = monitorRepository.findOwnerEmail(monitor.getId());
+                    emailService.sendDownAlert(to, monitor.getName(), monitor.getUrl(), result.failureReason());
+                    monitor.setAlertActive(true);
+                    monitor.setLastAlertSentAt(now);
+                }
+            }
+
+            // reminder every 4 hours while still down
+            if (monitor.getStatus() == MonitorStatus.DOWN
+                    && monitor.isAlertActive()
+                    && monitor.getLastAlertSentAt() != null
+                    && Duration.between(monitor.getLastAlertSentAt(), now)
+                    .compareTo(REMINDER_INTERVAL) >= 0) {
+                String to = monitorRepository.findOwnerEmail(monitor.getId());
+                emailService.sendReminder(to, monitor.getName(), monitor.getUrl());
+                monitor.setLastAlertSentAt(now);
             }
         }
     }
