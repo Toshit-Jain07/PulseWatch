@@ -10,6 +10,7 @@ import com.toshit.PulseWatch.repository.IncidentRepository;
 import com.toshit.PulseWatch.repository.MonitorCheckRepository;
 import com.toshit.PulseWatch.repository.MonitorRepository;
 import com.toshit.PulseWatch.services.EmailService;
+import com.toshit.PulseWatch.services.RedisLockService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -18,6 +19,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
 
@@ -35,6 +37,9 @@ public class MonitorScheduler {
 
     private static final Duration RECOVERY_CONFIRMATION = Duration.ofMinutes(1);
     private static final Duration REMINDER_INTERVAL = Duration.ofHours(1);
+
+    private final RedisLockService redisLockService;
+
     @Scheduled(fixedRate = 10000)
     public void checkDueMonitors() {
         List<Monitor> dueMonitors = monitorRepository.findDueMonitors(LocalDateTime.now());
@@ -43,32 +48,60 @@ public class MonitorScheduler {
         try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
             for (Monitor monitor : dueMonitors) {
                 executor.submit(() -> {
-                    CheckResult result = monitorCheckService.check(monitor);
+                    try {
+                        checkMonitor(monitor);
+                    } catch (Exception e) {
+                        log.error("Check failed for monitor {}", monitor.getId(), e);
+                    }
+                });
+            }
+        }
+    }
 
-                    MonitorCheck monitorCheck = new MonitorCheck();
-                    monitorCheck.setMonitor(monitor);
-                    monitorCheck.setSuccess(result.success());
-                    monitorCheck.setStatusCode(result.statusCode());
-                    monitorCheck.setResponseTimeMs(result.responseTimeMs());
-                    monitorCheck.setFailureReason(result.failureReason());
-                    monitorCheckRepository.save(monitorCheck);
+    private void checkMonitor(Monitor staleMonitor) {
+        String lockKey = "lock:monitor:" + staleMonitor.getId();
+        // lock must outlive the longest possible check (timeout) plus a buffer
+        Duration ttl = Duration.ofMillis(staleMonitor.getTimeoutMs()).plusSeconds(15);
 
+        Optional<String> token = redisLockService.tryLock(lockKey, ttl);
+        if (token.isEmpty()) {
+            log.debug("Monitor {} is being checked elsewhere, skipping", staleMonitor.getId());
+            return;
+        }
 
-                    applyCheckResult(monitor, result);
+        try {
+            Monitor monitor = monitorRepository.findById(staleMonitor.getId()).orElse(null);
+            if (monitor == null || !isStillDue(monitor)) {
+                return;   // deleted, or another instance already checked it
+            }
 
-                    monitor.setLastCheckedAt(LocalDateTime.now());
-                    monitorRepository.save(monitor);
+            CheckResult result = monitorCheckService.check(monitor);
 
-                    log.info("Checked {} ({}): success={}, status={}, time={}ms, reason={}",
-                            monitor.getName(),
-                            monitor.getUrl(),
-                            result.success(),
-                            result.statusCode(),
-                            result.responseTimeMs(),
-                            result.failureReason());
+            MonitorCheck monitorCheck = new MonitorCheck();
+            monitorCheck.setMonitor(monitor);
+            monitorCheck.setSuccess(result.success());
+            monitorCheck.setStatusCode(result.statusCode());
+            monitorCheck.setResponseTimeMs(result.responseTimeMs());
+            monitorCheck.setFailureReason(result.failureReason());
+            monitorCheckRepository.save(monitorCheck);
 
-                });            }
-        } // executor.close() is called automatically here — waits for all submitted tasks to finish
+            applyCheckResult(monitor, result);
+            monitor.setLastCheckedAt(LocalDateTime.now());
+            monitorRepository.save(monitor);
+
+            log.info("Checked {} ({}): success={}, status={}, monitorStatus={}, time={}ms, reason={}",
+                    monitor.getName(), monitor.getUrl(), result.success(), result.statusCode(),
+                    monitor.getStatus(), result.responseTimeMs(), result.failureReason());
+        } finally {
+            redisLockService.unlock(lockKey, token.get());
+        }
+    }
+
+    private boolean isStillDue(Monitor monitor) {
+        return monitor.getLastCheckedAt() == null
+                || !monitor.getLastCheckedAt()
+                .plusSeconds(monitor.getCheckIntervalSeconds())
+                .isAfter(LocalDateTime.now());
     }
 
     private void applyCheckResult(Monitor monitor, CheckResult result) {
